@@ -122,6 +122,7 @@ async def generate(
     - รวม chunk ด้วย ffmpeg
     - คืน Content-Type: audio/mpeg
     """
+    logger.info(f"POST /generate - Request: text_len={len(req.text)}, lang={req.lang}, voice_gender={req.voice_gender}, voice_name={req.voice_name}, rate={req.rate}, bf_lib_keys={list(req.bf_lib.keys())}, at_lib_keys={list(req.at_lib.keys())}")
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="text ไม่ควรว่าง")
 
@@ -165,6 +166,7 @@ async def stream_audio(
         const reader = resp.body.getReader()
         // push chunks เข้า MediaSource API
     """
+    logger.info(f"POST /stream - Request: text_len={len(req.text)}, lang={req.lang}, voice_gender={req.voice_gender}, voice_name={req.voice_name}, rate={req.rate}, bf_lib_keys={list(req.bf_lib.keys())}, at_lib_keys={list(req.at_lib.keys())}")
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="text ไม่ควรว่าง")
 
@@ -218,6 +220,7 @@ async def websocket_stream(websocket: WebSocket):
         import json
         data = json.loads(raw)
         req = TTSRequest(**data)
+        logger.info(f"WebSocket /ws/stream - Request: text_len={len(req.text)}, lang={req.lang}, voice_gender={req.voice_gender}, voice_name={req.voice_name}, rate={req.rate}, bf_lib_keys={list(req.bf_lib.keys())}, at_lib_keys={list(req.at_lib.keys())}")
 
         # verify API key ถ้ามี (ส่งใน config)
         if API_KEY and data.get("api_key") != API_KEY:
@@ -263,6 +266,7 @@ async def preview(
     Preview สั้น — ใช้แค่ N ตัวอักษรแรก เพื่อทดสอบ voice/rate
     คืน MP3 bytes เหมือน /generate
     """
+    logger.info(f"POST /preview - Request: text_len={len(req.text)}, preview_chars={req.preview_chars}, lang={req.lang}, voice_gender={req.voice_gender}, voice_name={req.voice_name}, rate={req.rate}, bf_lib_keys={list(req.bf_lib.keys())}, at_lib_keys={list(req.at_lib.keys())}")
     text_short = req.text[: req.preview_chars]
     try:
         audio_bytes, meta = await engine.generate_audio(
