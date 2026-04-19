@@ -196,9 +196,11 @@ async def get_voices(lang: str = "th", gender: str = "Female") -> List[dict]:
 async def pick_voice(lang: str = "th", gender: str = "Female", voice_name: Optional[str] = None) -> str:
     if voice_name:
         return voice_name
-    candidates = await get_voices(lang, gender)
+    # Normalize gender to capital case for edge-tts
+    normalized_gender = gender.capitalize() if gender else "Female"
+    candidates = await get_voices(lang, normalized_gender)
     if not candidates:
-        raise RuntimeError(f"ไม่พบเสียง lang={lang} gender={gender}")
+        raise RuntimeError(f"ไม่พบเสียง lang={lang} gender={normalized_gender}")
     return random.choice(candidates)["Name"]
 
 
