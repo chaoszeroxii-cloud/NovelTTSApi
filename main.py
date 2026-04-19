@@ -3,11 +3,11 @@
 """
 Novel TTS API — FastAPI
 Endpoints:
-  POST /generate          → batch MP3 file (รับทั้งตอน คืน MP3)
-  POST /stream            → chunked HTTP stream (real-time audio)
+  POST /generate          → batch MP3 file (รับทั้งตอน + tone config คืน MP3)
+  POST /stream            → chunked HTTP stream (real-time audio + tone)
   WebSocket /ws/stream    → WebSocket binary stream
   GET  /voices            → list available voices
-  POST /preview           → preview สั้น (200 chars แรก)
+  POST /preview           → preview สั้น (tone config support)
   GET  /health            → health check
 """
 
@@ -61,6 +61,9 @@ class TTSRequest(BaseModel):
     bf_lib: Dict[str, str] = Field(default={}, description="lib แทนที่คำ ก่อน process (ส่งแค่คำที่ใช้)")
     at_lib: Dict[str, str] = Field(default={}, description="lib แทนที่คำ หลัง process (ส่งแค่คำที่ใช้)")
     rate: str = Field(default="+35%", description="ความเร็วเสียง เช่น +35% หรือ -10%")
+    rate_pct: Optional[str] = Field(default=None, description="rate override (percentage)")
+    pitch_hz: Optional[str] = Field(default=None, description="pitch adjustment เช่น +0Hz, -10Hz")
+    volume_pct: Optional[str] = Field(default=None, description="volume adjustment เช่น 0, +30%, -50%")
     voice_gender: str = Field(default="Female", description="Female หรือ Male")
     voice_name: Optional[str] = Field(default=None, description="ชื่อ voice เฉพาะ (ถ้าต้องการ lock)")
     lang: str = Field(default="th", description="ภาษา เช่น th, en")
@@ -71,6 +74,9 @@ class PreviewRequest(BaseModel):
     bf_lib: Dict[str, str] = {}
     at_lib: Dict[str, str] = {}
     rate: str = "+35%"
+    rate_pct: Optional[str] = Field(default=None, description="rate override (percentage)")
+    pitch_hz: Optional[str] = Field(default=None, description="pitch adjustment")
+    volume_pct: Optional[str] = Field(default=None, description="volume adjustment")
     voice_gender: str = "Female"
     voice_name: Optional[str] = None
     lang: str = "th"
@@ -146,21 +152,27 @@ async def generate(
     Batch generation — รับข้อความทั้งตอน คืนไฟล์ MP3
     - แบ่ง chunk อัตโนมัติถ้าข้อความยาว
     - รวม chunk ด้วย ffmpeg
+    - รองรับ tone config (pitch_hz, rate_pct, volume_pct)
     - คืน Content-Type: audio/mpeg
     """
-    logger.info(f"POST /generate - Request: text_len={len(req.text)}, lang={req.lang}, voice_gender={req.voice_gender}, voice_name={req.voice_name}, rate={req.rate}, bf_lib_keys={list(req.bf_lib.keys())}, at_lib_keys={list(req.at_lib.keys())}")
+    logger.info(f"POST /generate - Request: text_len={len(req.text)}, lang={req.lang}, voice_gender={req.voice_gender}, voice_name={req.voice_name}, rate={req.rate}, pitch_hz={req.pitch_hz}, rate_pct={req.rate_pct}, volume_pct={req.volume_pct}, bf_lib_keys={list(req.bf_lib.keys())}, at_lib_keys={list(req.at_lib.keys())}")
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="text ไม่ควรว่าง")
 
     try:
+        # Use rate_pct if provided, otherwise use rate
+        final_rate = req.rate_pct or req.rate
+        
         audio_bytes, meta = await engine.generate_audio(
             text=req.text,
             bf_lib=req.bf_lib,
             at_lib=req.at_lib,
-            rate=req.rate,
+            rate=final_rate,
+            pitch_hz=req.pitch_hz,
+            volume_pct=req.volume_pct,
             voice_gender=req.voice_gender,
             voice_name=req.voice_name,
-            lang=req.lang,
+            lang=req.lang
         )
         headers = {
             "X-Voice": meta["voice"],
@@ -186,26 +198,30 @@ async def stream_audio(
     """
     HTTP Chunked Streaming — ส่ง MP3 bytes แบบ real-time
     ฝั่ง client รับ response แล้ว pipe เข้า audio player ได้เลย
+    รองรับ tone config (pitch_hz, rate_pct, volume_pct)
     
     ตัวอย่าง JS:
         const resp = await fetch('/stream', { method: 'POST', body: JSON.stringify(req) })
         const reader = resp.body.getReader()
         // push chunks เข้า MediaSource API
     """
-    logger.info(f"POST /stream - Request: text_len={len(req.text)}, lang={req.lang}, voice_gender={req.voice_gender}, voice_name={req.voice_name}, rate={req.rate}, bf_lib_keys={list(req.bf_lib.keys())}, at_lib_keys={list(req.at_lib.keys())}")
+    logger.info(f"POST /stream - Request: text_len={len(req.text)}, lang={req.lang}, voice_gender={req.voice_gender}, voice_name={req.voice_name}, rate={req.rate}, pitch_hz={req.pitch_hz}, rate_pct={req.rate_pct}, volume_pct={req.volume_pct}, bf_lib_keys={list(req.bf_lib.keys())}, at_lib_keys={list(req.at_lib.keys())}")
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="text ไม่ควรว่าง")
 
     async def audio_generator():
         try:
+            final_rate = req.rate_pct or req.rate
             async for chunk in engine.stream_audio_chunks(
                 text=req.text,
                 bf_lib=req.bf_lib,
                 at_lib=req.at_lib,
-                rate=req.rate,
+                rate=final_rate,
+                pitch_hz=req.pitch_hz,
+                volume_pct=req.volume_pct,
                 voice_gender=req.voice_gender,
                 voice_name=req.voice_name,
-                lang=req.lang,
+                lang=req.lang
             ):
                 yield chunk
         except Exception as e:
@@ -246,7 +262,7 @@ async def websocket_stream(websocket: WebSocket):
         import json
         data = json.loads(raw)
         req = TTSRequest(**data)
-        logger.info(f"WebSocket /ws/stream - Request: text_len={len(req.text)}, lang={req.lang}, voice_gender={req.voice_gender}, voice_name={req.voice_name}, rate={req.rate}, bf_lib_keys={list(req.bf_lib.keys())}, at_lib_keys={list(req.at_lib.keys())}")
+        logger.info(f"WebSocket /ws/stream - Request: text_len={len(req.text)}, lang={req.lang}, voice_gender={req.voice_gender}, voice_name={req.voice_name}, rate={req.rate}, pitch_hz={req.pitch_hz}, rate_pct={req.rate_pct}, volume_pct={req.volume_pct}, bf_lib_keys={list(req.bf_lib.keys())}, at_lib_keys={list(req.at_lib.keys())}")
 
         # verify API key ถ้ามี (ส่งใน config)
         if API_KEY and data.get("api_key") != API_KEY:
@@ -259,15 +275,18 @@ async def websocket_stream(websocket: WebSocket):
             await websocket.close()
             return
 
-        # stream audio
+        # stream audio with tone config
+        final_rate = req.rate_pct or req.rate
         async for chunk in engine.stream_audio_chunks(
             text=req.text,
             bf_lib=req.bf_lib,
             at_lib=req.at_lib,
-            rate=req.rate,
+            rate=final_rate,
+            pitch_hz=req.pitch_hz,
+            volume_pct=req.volume_pct,
             voice_gender=req.voice_gender,
             voice_name=req.voice_name,
-            lang=req.lang,
+            lang=req.lang
         ):
             await websocket.send_bytes(chunk)
 
@@ -289,20 +308,23 @@ async def preview(
     _auth=Depends(verify_api_key),
 ):
     """
-    Preview สั้น — ใช้แค่ N ตัวอักษรแรก เพื่อทดสอบ voice/rate
+    Preview สั้น — ใช้แค่ N ตัวอักษรแรก เพื่อทดสอบ voice/rate/tone
     คืน MP3 bytes เหมือน /generate
     """
-    logger.info(f"POST /preview - Request: text_len={len(req.text)}, preview_chars={req.preview_chars}, lang={req.lang}, voice_gender={req.voice_gender}, voice_name={req.voice_name}, rate={req.rate}, bf_lib_keys={list(req.bf_lib.keys())}, at_lib_keys={list(req.at_lib.keys())}")
+    logger.info(f"POST /preview - Request: text_len={len(req.text)}, preview_chars={req.preview_chars}, lang={req.lang}, voice_gender={req.voice_gender}, voice_name={req.voice_name}, rate={req.rate}, pitch_hz={req.pitch_hz}, rate_pct={req.rate_pct}, volume_pct={req.volume_pct}, bf_lib_keys={list(req.bf_lib.keys())}, at_lib_keys={list(req.at_lib.keys())}")
     text_short = req.text[: req.preview_chars]
     try:
+        final_rate = req.rate_pct or req.rate
         audio_bytes, meta = await engine.generate_audio(
             text=text_short,
             bf_lib=req.bf_lib,
             at_lib=req.at_lib,
-            rate=req.rate,
+            rate=final_rate,
+            pitch_hz=req.pitch_hz,
+            volume_pct=req.volume_pct,
             voice_gender=req.voice_gender,
             voice_name=req.voice_name,
-            lang=req.lang,
+            lang=req.lang
         )
         headers = {"X-Voice": meta["voice"], "X-Preview-Chars": str(req.preview_chars)}
         return Response(content=audio_bytes, media_type="audio/mpeg", headers=headers)

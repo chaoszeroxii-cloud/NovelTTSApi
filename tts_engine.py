@@ -215,7 +215,13 @@ async def synthesize_to_bytes(
     """แปลงข้อความ → bytes (MP3) ผ่าน edge-tts (รองรับ pitch, volume)"""
     for attempt in range(1, max_retries + 1):
         try:
-            communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, volume=volume)
+            communicate = edge_tts.Communicate(
+                text,
+                voice,
+                rate=rate,
+                pitch=pitch,
+                volume=volume
+            )
             buf = io.BytesIO()
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
@@ -234,9 +240,17 @@ async def synthesize_stream(
     text: str,
     voice: str,
     rate: str = "+35%",
+    pitch: str = "+0Hz",
+    volume: str = "+0%",
 ) -> AsyncIterator[bytes]:
-    """Stream audio chunks จาก edge-tts แบบ real-time"""
-    communicate = edge_tts.Communicate(text, voice, rate=rate)
+    """Stream audio chunks จาก edge-tts แบบ real-time พร้อม tone config"""
+    communicate = edge_tts.Communicate(
+        text,
+        voice,
+        rate=rate,
+        pitch=pitch,
+        volume=volume
+    )
     async for chunk in communicate.stream():
         if chunk["type"] == "audio":
             yield chunk["data"]
@@ -285,24 +299,30 @@ async def generate_audio(
     bf_lib: Dict[str, str] = {},
     at_lib: Dict[str, str] = {},
     rate: str = "+35%",
+    pitch_hz: Optional[str] = None,
+    volume_pct: Optional[str] = None,
     voice_gender: str = "Female",
     voice_name: Optional[str] = None,
     lang: str = "th",
 ) -> Tuple[bytes, dict]:
     """
-    Batch generation: รับข้อความทั้งตอน → คืน MP3 bytes
+    Batch generation: รับข้อความทั้งตอน → คืน MP3 bytes พร้อม tone config
     Returns: (audio_bytes, metadata)
     """
     processed = preprocess_text(text, bf_lib, at_lib)
     chunks = split_text_by_chars(processed)
     voice = await pick_voice(lang, voice_gender, voice_name)
 
-    logger.info(f"Generating {len(chunks)} chunk(s) with voice={voice}")
+    # Default tone values if not provided
+    final_pitch = pitch_hz or "+0Hz"
+    final_volume = volume_pct or "+0%"
+
+    logger.info(f"Generating {len(chunks)} chunk(s) with voice={voice}, rate={rate}, pitch={final_pitch}, volume={final_volume}")
 
     audio_parts = []
     for i, chunk in enumerate(chunks):
         logger.info(f"  chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
-        data = await synthesize_to_bytes(chunk, voice, rate)
+        data = await synthesize_to_bytes(chunk, voice, rate, final_pitch, final_volume)
         audio_parts.append(data)
 
     final_audio = concat_mp3_bytes(audio_parts)
@@ -320,22 +340,28 @@ async def stream_audio_chunks(
     bf_lib: Dict[str, str] = {},
     at_lib: Dict[str, str] = {},
     rate: str = "+35%",
+    pitch_hz: Optional[str] = None,
+    volume_pct: Optional[str] = None,
     voice_gender: str = "Female",
     voice_name: Optional[str] = None,
     lang: str = "th",
 ) -> AsyncIterator[bytes]:
     """
-    Streaming generation: yield MP3 bytes ทันทีที่ได้จาก edge-tts
+    Streaming generation: yield MP3 bytes ทันทีที่ได้จาก edge-tts พร้อม tone config
     เหมาะกับ real-time playback
     """
     processed = preprocess_text(text, bf_lib, at_lib, append_end=False)
     chunks = split_text_by_chars(processed)
     voice = await pick_voice(lang, voice_gender, voice_name)
 
-    logger.info(f"Streaming {len(chunks)} chunk(s) with voice={voice}")
+    # Default tone values if not provided
+    final_pitch = pitch_hz or "+0Hz"
+    final_volume = volume_pct or "+0%"
+
+    logger.info(f"Streaming {len(chunks)} chunk(s) with voice={voice}, rate={rate}, pitch={final_pitch}, volume={final_volume}")
 
     for chunk in chunks:
-        async for audio_chunk in synthesize_stream(chunk, voice, rate):
+        async for audio_chunk in synthesize_stream(chunk, voice, rate, final_pitch, final_volume):
             yield audio_chunk
 
 
