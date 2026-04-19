@@ -14,7 +14,7 @@ Endpoints:
 import asyncio
 import logging
 import os
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 from fastapi import (
     FastAPI, HTTPException, WebSocket, WebSocketDisconnect,
@@ -75,6 +75,32 @@ class PreviewRequest(BaseModel):
     voice_name: Optional[str] = None
     lang: str = "th"
     preview_chars: int = Field(default=300, ge=50, le=1000)
+
+
+# ─── Multi-line TTS Models ───────────────────────────────────────────────────
+
+class ToneConfig(BaseModel):
+    """แต่ละ tone มีค่า pitch, rate, volume"""
+    tone_name: str = Field(..., description="normal, angry, whisper, sad, excited, fearful, serious, cold")
+    pitch_hz: str = Field(..., description="เช่น +0Hz, -10Hz (Hz format)")
+    rate_pct: str = Field(..., description="เช่น +0%, +15% (percentage)")
+    volume_pct: str = Field(..., description="เช่น 0, +30%, -50% (percentage)")
+
+
+class LineAudio(BaseModel):
+    """แต่ละบรรทัด/ส่วนข้อความ"""
+    text: str = Field(..., description="ข้อความของบรรทัด")
+    tone: ToneConfig = Field(..., description="Tone config สำหรับบรรทัดนี้")
+    voice_gender: str = Field(default="Female", description="Female หรือ Male")
+    voice_name: Optional[str] = Field(default=None, description="ชื่อ voice เฉพาะ (ถ้าต้องการ lock)")
+
+
+class MultiLineRequest(BaseModel):
+    """ส่ง array บรรทัด + glossary global"""
+    lines: List[LineAudio] = Field(..., description="List of lines with tone config")
+    bf_lib: Dict[str, str] = Field(default={}, description="lib แทนที่คำ ก่อน process (ส่งทั้งหมด)")
+    at_lib: Dict[str, str] = Field(default={}, description="lib แทนที่คำ หลัง process (ส่งทั้งหมด)")
+    lang: str = Field(default="th", description="ภาษา")
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -281,6 +307,74 @@ async def preview(
         headers = {"X-Voice": meta["voice"], "X-Preview-Chars": str(req.preview_chars)}
         return Response(content=audio_bytes, media_type="audio/mpeg", headers=headers)
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/generate-multi")
+async def generate_multi(
+    req: MultiLineRequest,
+    _auth=Depends(verify_api_key),
+):
+    """
+    Multi-line generation — แต่ละบรรทัดมี tone config + voice + pitch/rate/volume
+    - รับ array lines ที่มี text + tone (pitch, rate, volume)
+    - ส่ง glossary (bf_lib, at_lib) ที่จะใช้ทั้งหมด
+    - Generate MP3 แยกต่อบรรทัด แล้ว merge
+    - คืน MP3 ไฟล์เดียว
+    """
+    logger.info(f"POST /generate-multi - Request: lines={len(req.lines)}, lang={req.lang}, bf_lib_keys={list(req.bf_lib.keys())}, at_lib_keys={list(req.at_lib.keys())}")
+    
+    if not req.lines:
+        raise HTTPException(status_code=400, detail="lines ต้องไม่ว่าง")
+
+    try:
+        # Build line configs พร้อม voice (pick voice สำหรับแต่ละบรรทัด)
+        line_configs = []
+        for i, line in enumerate(req.lines):
+            if not line.text.strip():
+                logger.warning(f"  line {i+1}: ข้อความว่าง — skip")
+                continue
+
+            # Pick voice สำหรับบรรทัดนี้
+            voice = await engine.pick_voice(
+                lang=req.lang,
+                gender=line.voice_gender,
+                voice_name=line.voice_name
+            )
+
+            line_configs.append({
+                "text": line.text,
+                "voice": voice,
+                "pitch_hz": line.tone.pitch_hz,
+                "rate_pct": line.tone.rate_pct,
+                "volume_pct": line.tone.volume_pct,
+            })
+
+        if not line_configs:
+            raise HTTPException(status_code=400, detail="ไม่มีบรรทัดที่ถูกต้อง")
+
+        # Generate multi-line audio
+        audio_bytes, meta = await engine.generate_audio_for_lines(
+            lines=line_configs,
+            bf_lib=req.bf_lib,
+            at_lib=req.at_lib,
+        )
+
+        headers = {
+            "X-Lines": str(meta["lines"]),
+            "X-Audio-Parts": str(meta["audio_parts"]),
+            "X-Chars": str(meta["total_chars"]),
+            "Content-Disposition": "attachment; filename=output-multi.mp3",
+        }
+        return Response(
+            content=audio_bytes,
+            media_type="audio/mpeg",
+            headers=headers,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"/generate-multi error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

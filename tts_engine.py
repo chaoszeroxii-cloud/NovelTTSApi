@@ -208,12 +208,14 @@ async def synthesize_to_bytes(
     text: str,
     voice: str,
     rate: str = "+35%",
+    pitch: str = "+0Hz",
+    volume: str = "+0%",
     max_retries: int = 5,
 ) -> bytes:
-    """แปลงข้อความ → bytes (MP3) ผ่าน edge-tts"""
+    """แปลงข้อความ → bytes (MP3) ผ่าน edge-tts (รองรับ pitch, volume)"""
     for attempt in range(1, max_retries + 1):
         try:
-            communicate = edge_tts.Communicate(text, voice, rate=rate)
+            communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, volume=volume)
             buf = io.BytesIO()
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
@@ -335,3 +337,71 @@ async def stream_audio_chunks(
     for chunk in chunks:
         async for audio_chunk in synthesize_stream(chunk, voice, rate):
             yield audio_chunk
+
+
+# ─── Multi-line Generation ───────────────────────────────────────────────────
+
+async def generate_audio_for_lines(
+    lines: List[dict],  # [{"text": "...", "pitch_hz": "+0Hz", "rate_pct": "+0%", "volume_pct": "+0%", "voice": "..."}, ...]
+    bf_lib: Dict[str, str] = {},
+    at_lib: Dict[str, str] = {},
+) -> Tuple[bytes, dict]:
+    """
+    Per-line generation: แต่ละบรรทัดสร้าง MP3 แยก แล้ว merge
+    
+    Args:
+        lines: List of dicts with keys: text, pitch_hz, rate_pct, volume_pct, voice
+        bf_lib: Dictionary for before-processing replacements
+        at_lib: Dictionary for after-processing replacements
+    
+    Returns: (audio_bytes, metadata)
+    """
+    if not lines:
+        raise ValueError("lines ต้องไม่ว่าง")
+
+    logger.info(f"Generating {len(lines)} line(s)")
+
+    audio_parts = []
+    total_chars = 0
+
+    for i, line_cfg in enumerate(lines):
+        text = line_cfg.get("text", "").strip()
+        if not text:
+            logger.warning(f"  line {i+1}: ข้อความว่าง — skip")
+            continue
+
+        # Process text ด้วย glossary
+        processed = preprocess_text(text, bf_lib, at_lib, append_end=False)
+        total_chars += len(processed)
+
+        pitch_hz = line_cfg.get("pitch_hz", "+0Hz")
+        rate_pct = line_cfg.get("rate_pct", "+0%")
+        volume_pct = line_cfg.get("volume_pct", "+0%")
+        voice = line_cfg.get("voice", "")
+
+        if not voice:
+            raise ValueError(f"line {i+1}: voice ต้องระบุ")
+
+        logger.info(f"  line {i+1}/{len(lines)}: voice={voice}, pitch={pitch_hz}, rate={rate_pct}, volume={volume_pct}")
+
+        # Generate MP3 สำหรับบรรทัดนี้
+        data = await synthesize_to_bytes(
+            processed, voice,
+            rate=rate_pct,
+            pitch=pitch_hz,
+            volume=volume_pct
+        )
+        if data:
+            audio_parts.append(data)
+
+    if not audio_parts:
+        raise RuntimeError("ไม่มี audio parts สร้างสำเร็จ")
+
+    # Merge all parts
+    final_audio = concat_mp3_bytes(audio_parts)
+    metadata = {
+        "lines": len(lines),
+        "audio_parts": len(audio_parts),
+        "total_chars": total_chars,
+    }
+    return final_audio, metadata
