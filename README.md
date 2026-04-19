@@ -1,4 +1,4 @@
-# Novel TTS API
+﻿# Novel TTS API
 
 Edge TTS สำหรับนิยาย — deploy บน cloud แล้วเรียกจาก text editor
 
