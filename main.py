@@ -275,20 +275,37 @@ async def websocket_stream(websocket: WebSocket):
             await websocket.close()
             return
 
-        # stream audio with tone config
+        processed = engine.preprocess_text(req.text, req.bf_lib, req.at_lib)
+        chunks = engine.split_text_by_chars(processed)
+        voice = await engine.pick_voice(req.lang, req.voice_gender, req.voice_name)
         final_rate = req.rate_pct or req.rate
-        async for chunk in engine.stream_audio_chunks(
-            text=req.text,
-            bf_lib=req.bf_lib,
-            at_lib=req.at_lib,
-            rate=final_rate,
-            pitch_hz=req.pitch_hz,
-            volume_pct=req.volume_pct,
-            voice_gender=req.voice_gender,
-            voice_name=req.voice_name,
-            lang=req.lang
-        ):
-            await websocket.send_bytes(chunk)
+        final_pitch = req.pitch_hz or "+0Hz"
+        final_volume = req.volume_pct or "+0%"
+        total_chunks = len(chunks)
+
+        for idx, chunk_text in enumerate(chunks):
+            await websocket.send_json({
+                "type": "progress",
+                "phase": "starting",
+                "current": idx + 1,
+                "total": total_chunks,
+                "percent": int((idx / total_chunks) * 100) if total_chunks > 0 else 0,
+            })
+            async for chunk in engine.synthesize_stream(
+                chunk_text,
+                voice,
+                final_rate,
+                final_pitch,
+                final_volume
+            ):
+                await websocket.send_bytes(chunk)
+            await websocket.send_json({
+                "type": "progress",
+                "phase": "completed",
+                "current": idx + 1,
+                "total": total_chunks,
+                "percent": int(((idx + 1) / total_chunks) * 100) if total_chunks > 0 else 100,
+            })
 
         await websocket.send_text("END")
 
