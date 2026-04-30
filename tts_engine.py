@@ -258,6 +258,25 @@ async def synthesize_stream(
             yield chunk["data"]
 
 
+async def synthesize_stream_events(
+    text: str,
+    voice: str,
+    rate: str = "+35%",
+    pitch: str = "+0Hz",
+    volume: str = "+0%",
+) -> AsyncIterator[dict]:
+    """Stream raw edge-tts events for richer progress updates."""
+    communicate = edge_tts.Communicate(
+        text,
+        voice,
+        rate=rate,
+        pitch=pitch,
+        volume=volume,
+    )
+    async for chunk in communicate.stream():
+        yield chunk
+
+
 # ─── Concat with ffmpeg ───────────────────────────────────────────────────────
 
 def concat_mp3_bytes(audio_parts: List[bytes]) -> bytes:

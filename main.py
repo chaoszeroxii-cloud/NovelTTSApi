@@ -282,29 +282,55 @@ async def websocket_stream(websocket: WebSocket):
         final_pitch = req.pitch_hz or "+0Hz"
         final_volume = req.volume_pct or "+0%"
         total_chunks = len(chunks)
+        total_chars = max(len(processed), 1)
+        completed_chars = 0
 
         for idx, chunk_text in enumerate(chunks):
+            chunk_len = max(len(chunk_text), 1)
+            chunk_progress_chars = 0
+            last_sent_percent = int((completed_chars / total_chars) * 100)
             await websocket.send_json({
                 "type": "progress",
                 "phase": "starting",
                 "current": idx + 1,
                 "total": total_chunks,
-                "percent": int((idx / total_chunks) * 100) if total_chunks > 0 else 0,
+                "percent": last_sent_percent,
             })
-            async for chunk in engine.synthesize_stream(
+            async for event in engine.synthesize_stream_events(
                 chunk_text,
                 voice,
                 final_rate,
                 final_pitch,
                 final_volume
             ):
-                await websocket.send_bytes(chunk)
+                event_type = event.get("type")
+                if event_type == "audio":
+                    await websocket.send_bytes(event["data"])
+                    continue
+
+                if event_type in {"WordBoundary", "SentenceBoundary"}:
+                    boundary_text = str(event.get("text") or "")
+                    if boundary_text:
+                        chunk_progress_chars = min(chunk_len, chunk_progress_chars + len(boundary_text))
+                        overall_chars = min(total_chars, completed_chars + chunk_progress_chars)
+                        percent = int((overall_chars / total_chars) * 100)
+                        if percent > last_sent_percent:
+                            last_sent_percent = percent
+                            await websocket.send_json({
+                                "type": "progress",
+                                "phase": "progress",
+                                "current": idx + 1,
+                                "total": total_chunks,
+                                "percent": percent,
+                            })
+
+            completed_chars = min(total_chars, completed_chars + len(chunk_text))
             await websocket.send_json({
                 "type": "progress",
                 "phase": "completed",
                 "current": idx + 1,
                 "total": total_chunks,
-                "percent": int(((idx + 1) / total_chunks) * 100) if total_chunks > 0 else 100,
+                "percent": int((completed_chars / total_chars) * 100),
             })
 
         await websocket.send_text("END")
