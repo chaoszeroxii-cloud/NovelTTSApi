@@ -39,10 +39,13 @@ THAI_POS = {
 # ─── Text Processing ─────────────────────────────────────────────────────────
 
 def replace_with_lib(text: str, lib: Dict[str, str]) -> str:
-    """แทนที่คำด้วย lib (exact match, compiled regex)"""
+    """แทนที่คำด้วย lib (exact match, compiled regex)
+    Sort keys by length descending so longer words match before
+    shorter ones that are substrings of them (e.g. 'แทรกซึม' before 'แทรก')."""
     if not lib:
         return text
-    pattern = re.compile("|".join(re.escape(k) for k in lib.keys()))
+    sorted_keys = sorted(lib.keys(), key=len, reverse=True)
+    pattern = re.compile("|".join(re.escape(k) for k in sorted_keys))
     return pattern.sub(lambda m: lib[m.group(0)], text)
 
 
