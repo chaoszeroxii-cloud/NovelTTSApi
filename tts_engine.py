@@ -333,7 +333,7 @@ async def generate_audio(
     Batch generation: รับข้อความทั้งตอน → คืน MP3 bytes พร้อม tone config
     Returns: (audio_bytes, metadata)
     """
-    processed = preprocess_text(text, bf_lib, at_lib, append_end=False)
+    processed = preprocess_text(text, bf_lib, at_lib, append_end=True)
     chunks = split_text_by_chars(processed)
     voice = await pick_voice(lang, voice_gender, voice_name)
 
