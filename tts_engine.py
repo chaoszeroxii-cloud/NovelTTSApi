@@ -374,7 +374,7 @@ async def stream_audio_chunks(
     Streaming generation: yield MP3 bytes ทันทีที่ได้จาก edge-tts พร้อม tone config
     เหมาะกับ real-time playback
     """
-    processed = preprocess_text(text, bf_lib, at_lib)
+    processed = preprocess_text(text, bf_lib, at_lib, append_end=False)
     chunks = split_text_by_chars(processed)
     voice = await pick_voice(lang, voice_gender, voice_name)
 
