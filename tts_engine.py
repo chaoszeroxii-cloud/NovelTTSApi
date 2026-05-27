@@ -328,12 +328,13 @@ async def generate_audio(
     voice_gender: str = "Female",
     voice_name: Optional[str] = None,
     lang: str = "th",
+    append_end: bool = True,
 ) -> Tuple[bytes, dict]:
     """
     Batch generation: รับข้อความทั้งตอน → คืน MP3 bytes พร้อม tone config
     Returns: (audio_bytes, metadata)
     """
-    processed = preprocess_text(text, bf_lib, at_lib, append_end=True)
+    processed = preprocess_text(text, bf_lib, at_lib, append_end=append_end)
     chunks = split_text_by_chars(processed)
     voice = await pick_voice(lang, voice_gender, voice_name)
 
@@ -369,12 +370,13 @@ async def stream_audio_chunks(
     voice_gender: str = "Female",
     voice_name: Optional[str] = None,
     lang: str = "th",
+    append_end: bool = True,
 ) -> AsyncIterator[bytes]:
     """
     Streaming generation: yield MP3 bytes ทันทีที่ได้จาก edge-tts พร้อม tone config
     เหมาะกับ real-time playback
     """
-    processed = preprocess_text(text, bf_lib, at_lib)
+    processed = preprocess_text(text, bf_lib, at_lib, append_end=append_end)
     chunks = split_text_by_chars(processed)
     voice = await pick_voice(lang, voice_gender, voice_name)
 

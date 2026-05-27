@@ -67,6 +67,7 @@ class TTSRequest(BaseModel):
     voice_gender: str = Field(default="Female", description="Female หรือ Male")
     voice_name: Optional[str] = Field(default=None, description="ชื่อ voice เฉพาะ (ถ้าต้องการ lock)")
     lang: str = Field(default="th", description="ภาษา เช่น th, en")
+    append_end: bool = Field(default=True, description="เพิ่ม 'จบตอน' ท้ายข้อความ")
 
 
 class PreviewRequest(BaseModel):
@@ -172,7 +173,8 @@ async def generate(
             volume_pct=req.volume_pct,
             voice_gender=req.voice_gender,
             voice_name=req.voice_name,
-            lang=req.lang
+            lang=req.lang,
+            append_end=req.append_end,
         )
         headers = {
             "X-Voice": meta["voice"],
@@ -221,7 +223,8 @@ async def stream_audio(
                 volume_pct=req.volume_pct,
                 voice_gender=req.voice_gender,
                 voice_name=req.voice_name,
-                lang=req.lang
+                lang=req.lang,
+                append_end=req.append_end,
             ):
                 yield chunk
         except Exception as e:
@@ -275,7 +278,7 @@ async def websocket_stream(websocket: WebSocket):
             await websocket.close()
             return
 
-        processed = engine.preprocess_text(req.text, req.bf_lib, req.at_lib)
+        processed = engine.preprocess_text(req.text, req.bf_lib, req.at_lib, append_end=req.append_end)
         chunks = engine.split_text_by_chars(processed)
         voice = await engine.pick_voice(req.lang, req.voice_gender, req.voice_name)
         final_rate = req.rate_pct or req.rate
