@@ -247,16 +247,12 @@ async def synthesize_stream(
     rate: str = "+35%",
     pitch: str = "+0Hz",
     volume: str = "+0%",
+    max_retries: int = 5,
 ) -> AsyncIterator[bytes]:
-    """Stream audio chunks จาก edge-tts แบบ real-time พร้อม tone config"""
-    communicate = edge_tts.Communicate(
-        text,
-        voice,
-        rate=rate,
-        pitch=pitch,
-        volume=volume
-    )
-    async for chunk in communicate.stream():
+    """Stream audio chunks and retry failures that happen before audio starts."""
+    async for chunk in _synthesize_stream_events_with_retry(
+        text, voice, rate, pitch, volume, max_retries
+    ):
         if chunk["type"] == "audio":
             yield chunk["data"]
 
@@ -267,17 +263,54 @@ async def synthesize_stream_events(
     rate: str = "+35%",
     pitch: str = "+0Hz",
     volume: str = "+0%",
+    max_retries: int = 5,
 ) -> AsyncIterator[dict]:
     """Stream raw edge-tts events for richer progress updates."""
-    communicate = edge_tts.Communicate(
-        text,
-        voice,
-        rate=rate,
-        pitch=pitch,
-        volume=volume,
-    )
-    async for chunk in communicate.stream():
+    async for chunk in _synthesize_stream_events_with_retry(
+        text, voice, rate, pitch, volume, max_retries
+    ):
         yield chunk
+
+
+async def _synthesize_stream_events_with_retry(
+    text: str,
+    voice: str,
+    rate: str,
+    pitch: str,
+    volume: str,
+    max_retries: int,
+) -> AsyncIterator[dict]:
+    """Retry transient Edge TTS failures only before any audio has been emitted."""
+    for attempt in range(1, max_retries + 1):
+        audio_received = False
+        try:
+            communicate = edge_tts.Communicate(
+                text,
+                voice,
+                rate=rate,
+                pitch=pitch,
+                volume=volume,
+            )
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio_received = True
+                yield chunk
+            if not audio_received:
+                raise RuntimeError("Edge TTS stream ended without audio")
+            return
+        except Exception as exc:
+            # Restarting after audio was sent would duplicate audio at the client.
+            if audio_received or attempt == max_retries:
+                raise
+            wait = 2 ** attempt
+            logger.warning(
+                "TTS stream retry %s/%s before audio started: %s — wait %ss",
+                attempt,
+                max_retries,
+                exc,
+                wait,
+            )
+            await asyncio.sleep(wait)
 
 
 # ─── Concat with ffmpeg ───────────────────────────────────────────────────────
