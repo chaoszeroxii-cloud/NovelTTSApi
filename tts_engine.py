@@ -39,14 +39,57 @@ THAI_POS = {
 # ─── Text Processing ─────────────────────────────────────────────────────────
 
 def replace_with_lib(text: str, lib: Dict[str, str]) -> str:
-    """แทนที่คำด้วย lib (exact match, compiled regex)
-    Sort keys by length descending so longer words match before
-    shorter ones that are substrings of them (e.g. 'แทรกซึม' before 'แทรก')."""
+    """แทนที่คำด้วย lib (longest-match-wins)
+
+    ใช้ longest-match-wins จริง ไม่ใช่ regex แบบ leftmost-wins ธรรมดา เพราะ
+    การเรียง key ยาว-ก่อน-สั้น ใน alternation ช่วยได้เฉพาะตอน match เริ่มที่
+    ตำแหน่งเดียวกัน. ตัวอย่างปัญหา: "เทพลังปราณ" มี key "เทพ" (index 0) กับ
+    "พลังปราณ" (index 2) ใช้ตัว "พ" ร่วมกัน — regex จะเลือก "เทพ" เพราะเริ่ม
+    ก่อน แล้วกิน "พ" ไป เหลือ "ลังปราณ" อ่านผิด.
+    วิธีนี้เก็บ candidate ทุกตัว (รวมที่ทับซ้อน) แล้วเลือกตัวที่ยาวสุดก่อน
+    ทำให้ "พลังปราณ" ชนะ "เทพ".
+    """
     if not lib:
         return text
-    sorted_keys = sorted(lib.keys(), key=len, reverse=True)
-    pattern = re.compile("|".join(re.escape(k) for k in sorted_keys))
-    return pattern.sub(lambda m: lib[m.group(0)], text)
+
+    # เก็บ candidate ทุกตัว รวมที่เริ่มซ้อนในตัวอื่น
+    candidates = []  # (start, end, key)
+    for key in lib.keys():
+        if not key:
+            continue
+        start = 0
+        while True:
+            idx = text.find(key, start)
+            if idx == -1:
+                break
+            candidates.append((idx, idx + len(key), key))
+            start = idx + 1
+
+    if not candidates:
+        return text
+
+    # เรียงยาวสุดก่อน, เสมอกันเอาตัวที่อยู่ซ้ายก่อน
+    candidates.sort(key=lambda c: (-(c[1] - c[0]), c[0]))
+
+    used = [False] * len(text)
+    chosen = []  # (start, end, key)
+    for s, e, key in candidates:
+        if any(used[s:e]):
+            continue
+        for i in range(s, e):
+            used[i] = True
+        chosen.append((s, e, key))
+
+    chosen.sort(key=lambda c: c[0])
+
+    out = []
+    pos = 0
+    for s, e, key in chosen:
+        out.append(text[pos:s])
+        out.append(lib[key])
+        pos = e
+    out.append(text[pos:])
+    return "".join(out)
 
 
 def normalize_text(text: str) -> str:
