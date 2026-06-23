@@ -5,6 +5,7 @@ TTS Engine — ใช้ logic จาก TTS_Edge.py ปรับให้เป
 """
 
 import asyncio
+import bisect
 import io
 import logging
 import os
@@ -17,6 +18,12 @@ from typing import AsyncIterator, Dict, List, Optional, Tuple
 
 import edge_tts
 from edge_tts import VoicesManager
+
+try:
+    import ahocorasick
+    _HAS_AHOCORASICK = True
+except ImportError:  # fallback ไป str.find ถ้าไม่มี (ผลลัพธ์เหมือนกัน แค่ช้ากว่า)
+    _HAS_AHOCORASICK = False
 
 logger = logging.getLogger(__name__)
 
@@ -38,21 +45,63 @@ THAI_POS = {
 
 # ─── Text Processing ─────────────────────────────────────────────────────────
 
-def replace_with_lib(text: str, lib: Dict[str, str]) -> str:
-    """แทนที่คำด้วย lib (longest-match-wins)
+def compile_lib(lib: Optional[Dict[str, str]]):
+    """Compile lib เป็น Aho-Corasick automaton ไว้ใช้ซ้ำ (compile ครั้งเดียว แล้ว
+    ส่งต่อให้ replace_with_lib ทุกบรรทัด).
 
-    ใช้ longest-match-wins จริง ไม่ใช่ regex แบบ leftmost-wins ธรรมดา เพราะ
-    การเรียง key ยาว-ก่อน-สั้น ใน alternation ช่วยได้เฉพาะตอน match เริ่มที่
-    ตำแหน่งเดียวกัน. ตัวอย่างปัญหา: "เทพลังปราณ" มี key "เทพ" (index 0) กับ
-    "พลังปราณ" (index 2) ใช้ตัว "พ" ร่วมกัน — regex จะเลือก "เทพ" เพราะเริ่ม
-    ก่อน แล้วกิน "พ" ไป เหลือ "ลังปราณ" อ่านผิด.
-    วิธีนี้เก็บ candidate ทุกตัว (รวมที่ทับซ้อน) แล้วเลือกตัวที่ยาวสุดก่อน
-    ทำให้ "พลังปราณ" ชนะ "เทพ".
+    สำคัญมากใน path per-line/multi-tone: ถ้า rebuild automaton ทุก call จะช้ากว่า
+    เวอร์ชัน str.find เดิมด้วยซ้ำ ต้อง compile นอก loop แล้ว reuse.
+    คืน None เมื่อ lib ว่าง หรือไม่มี pyahocorasick (จะ fallback ไป scan ธรรมดา).
     """
-    if not lib:
-        return text
+    if not lib or not _HAS_AHOCORASICK:
+        return None
+    automaton = ahocorasick.Automaton()
+    for key in lib.keys():
+        if key:
+            automaton.add_word(key, key)
+    if len(automaton) == 0:
+        return None
+    automaton.make_automaton()
+    return automaton
 
-    # เก็บ candidate ทุกตัว รวมที่เริ่มซ้อนในตัวอื่น
+
+def _select_and_apply(text: str, lib: Dict[str, str], candidates) -> str:
+    """เลือก candidate แบบ longest-match-wins แล้วประกอบข้อความใหม่.
+
+    candidates = list ของ (start, end, key). เรียงยาวสุดก่อน เสมอกันเอาซ้ายก่อน
+    แล้ว greedy เลือกตัวที่ไม่ทับกับที่เลือกไปแล้ว — ผลเหมือน used-bitmap เดิม
+    เป๊ะ แต่ใช้ interval scheduling + bisect แทน เลยไม่ต้องสร้าง slice ทุก candidate.
+    """
+    if not candidates:
+        return text
+    candidates.sort(key=lambda c: (-(c[1] - c[0]), c[0]))
+
+    acc_starts: List[int] = []
+    acc_ends: List[int] = []
+    chosen = []  # (start, end, key)
+    for s, e, key in candidates:
+        idx = bisect.bisect_right(acc_starts, s)
+        if idx > 0 and acc_ends[idx - 1] > s:
+            continue  # ทับกับ interval ทางซ้าย
+        if idx < len(acc_starts) and acc_starts[idx] < e:
+            continue  # ทับกับ interval ทางขวา
+        acc_starts.insert(idx, s)
+        acc_ends.insert(idx, e)
+        chosen.append((s, e, key))
+
+    chosen.sort(key=lambda c: c[0])
+    out = []
+    pos = 0
+    for s, e, key in chosen:
+        out.append(text[pos:s])
+        out.append(lib[key])
+        pos = e
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _collect_candidates_scan(text: str, lib: Dict[str, str]):
+    """fallback (ไม่มี pyahocorasick): หา candidate ทุกตัวด้วย str.find."""
     candidates = []  # (start, end, key)
     for key in lib.keys():
         if not key:
@@ -64,32 +113,32 @@ def replace_with_lib(text: str, lib: Dict[str, str]) -> str:
                 break
             candidates.append((idx, idx + len(key), key))
             start = idx + 1
+    return candidates
 
-    if not candidates:
+
+def replace_with_lib(text: str, lib: Dict[str, str], matcher=None) -> str:
+    """แทนที่คำด้วย lib (longest-match-wins จริง — ไม่ใช่ regex leftmost)
+
+    ใช้ longest-match-wins จริง ไม่ใช่ regex แบบ leftmost-wins ธรรมดา เพราะ
+    การเรียง key ยาว-ก่อน-สั้น ใน alternation ช่วยได้เฉพาะตอน match เริ่มที่
+    ตำแหน่งเดียวกัน. ตัวอย่างปัญหา: "เทพลังปราณ" มี key "เทพ" (index 0) กับ
+    "พลังปราณ" (index 2) ใช้ตัว "พ" ร่วมกัน — regex จะเลือก "เทพ" เพราะเริ่ม
+    ก่อน แล้วกิน "พ" ไป เหลือ "ลังปราณ" อ่านผิด. วิธีนี้เก็บ candidate ทุกตัว
+    (รวมที่ทับซ้อน) แล้วเลือกตัวที่ยาวสุดก่อน ทำให้ "พลังปราณ" ชนะ "เทพ".
+
+    หา candidate ด้วย Aho-Corasick (scan รอบเดียว ต้นทุนแปรตามเนื้อหา ไม่ใช่ตาม
+    ขนาด glossary) — ส่ง `matcher` ที่ compile_lib ไว้ล่วงหน้าเพื่อ reuse ข้าม
+    บรรทัด. ถ้าไม่มี pyahocorasick จะ fallback ไป str.find ได้ผลลัพธ์เหมือนกัน.
+    """
+    if not lib:
         return text
-
-    # เรียงยาวสุดก่อน, เสมอกันเอาตัวที่อยู่ซ้ายก่อน
-    candidates.sort(key=lambda c: (-(c[1] - c[0]), c[0]))
-
-    used = [False] * len(text)
-    chosen = []  # (start, end, key)
-    for s, e, key in candidates:
-        if any(used[s:e]):
-            continue
-        for i in range(s, e):
-            used[i] = True
-        chosen.append((s, e, key))
-
-    chosen.sort(key=lambda c: c[0])
-
-    out = []
-    pos = 0
-    for s, e, key in chosen:
-        out.append(text[pos:s])
-        out.append(lib[key])
-        pos = e
-    out.append(text[pos:])
-    return "".join(out)
+    if matcher is None:
+        matcher = compile_lib(lib)
+    if matcher is not None:
+        candidates = [(end - len(key) + 1, end + 1, key) for end, key in matcher.iter(text)]
+    else:
+        candidates = _collect_candidates_scan(text, lib)
+    return _select_and_apply(text, lib, candidates)
 
 
 def normalize_text(text: str) -> str:
@@ -192,12 +241,19 @@ def preprocess_text(
     bf_lib: Dict[str, str],
     at_lib: Dict[str, str],
     append_end: bool = True,
+    bf_matcher=None,
+    at_matcher=None,
 ) -> str:
-    """Pipeline เต็ม: bf_lib → normalize → convert numbers → at_lib"""
-    text = replace_with_lib(text, bf_lib)
+    """Pipeline เต็ม: bf_lib → normalize → convert numbers → at_lib
+
+    ส่ง bf_matcher/at_matcher (จาก compile_lib) เพื่อ reuse automaton ข้ามหลาย
+    บรรทัด (per-line/multi-tone). ถ้าไม่ส่งมา จะ compile ใหม่ในนี้ (ครั้งเดียวต่อ
+    call — เหมาะกับ path ข้อความก้อนเดียว).
+    """
+    text = replace_with_lib(text, bf_lib, bf_matcher)
     text = normalize_text(text)
     text = convert_numbers_in_text(text)
-    text = replace_with_lib(text, at_lib)
+    text = replace_with_lib(text, at_lib, at_matcher)
     if append_end:
         text += "\nจบตอน"
     return text
@@ -492,6 +548,11 @@ async def generate_audio_for_lines(
     audio_parts = []
     total_chars = 0
 
+    # compile glossary ครั้งเดียว reuse ทุกบรรทัด (สำคัญต่อ performance —
+    # ถ้า compile ใหม่ทุกบรรทัดจะช้ากว่าเดิม)
+    bf_matcher = compile_lib(bf_lib)
+    at_matcher = compile_lib(at_lib)
+
     for i, line_cfg in enumerate(lines):
         text = line_cfg.get("text", "").strip()
         if not text:
@@ -499,7 +560,10 @@ async def generate_audio_for_lines(
             continue
 
         # Process text ด้วย glossary
-        processed = preprocess_text(text, bf_lib, at_lib, append_end=False)
+        processed = preprocess_text(
+            text, bf_lib, at_lib, append_end=False,
+            bf_matcher=bf_matcher, at_matcher=at_matcher,
+        )
         total_chars += len(processed)
 
         pitch_hz = line_cfg.get("pitch_hz", "+0Hz")
